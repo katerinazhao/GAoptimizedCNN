@@ -75,10 +75,10 @@ test_data = test_data[['momentum', 'stochastic_K', 'RSI', 'MACD', 'LW', 'A/D Osc
 
 # Step 4: Make Trainable Dataset
 TIME_WINDOW_SIZE = 64
-num_epochs = 256
+num_epochs = 35
 batch_size = 8
-lr = 0.008  # 0.008 0.009 较为合适
-weight_decay = 3.16e-4  # L2正则化系数，1e-3 1e-4 3.16e-4
+lr = 0.0008  # 下降到0.001后，会显著过拟合
+weight_decay = 1e-1  # L2正则化系数，1e-3 1e-4 3.16e-4
 
 train_sequences = []
 train_labels = []
@@ -126,7 +126,7 @@ train_labels_tensor = torch.Tensor(train_labels).to(device)
 
 # Step 5: Define the TimeSeriesCNN
 class TimeSeriesCNN(nn.Module):
-    def __init__(self, input_length: int, num_kernel_conv1: int, num_kernel_conv2: int, kernel_size_conv1: list, kernel_size_conv2: list, kernel_size_pooling: int, fc_size=2, dropout_rate=0.35):
+    def __init__(self, input_length: int, num_kernel_conv1: int, num_kernel_conv2: int, kernel_size_conv1: list, kernel_size_conv2: list, kernel_size_pooling: int, fc_size=16, dropout_rate=0.8):
         super(TimeSeriesCNN, self).__init__()
         self.input_length = input_length
         self.num_kernel_conv1 = num_kernel_conv1
@@ -137,31 +137,19 @@ class TimeSeriesCNN(nn.Module):
         self.dropout_rate = dropout_rate
 
         self.conv1_layers = nn.ModuleList([
-            nn.Conv1d(in_channels=1, out_channels=num_kernel_conv1, kernel_size=kernel_size_conv1[0]),
-            nn.Conv1d(in_channels=1, out_channels=num_kernel_conv1, kernel_size=kernel_size_conv1[1]),
-            nn.Conv1d(in_channels=1, out_channels=num_kernel_conv1, kernel_size=kernel_size_conv1[2]),
-            nn.Conv1d(in_channels=1, out_channels=num_kernel_conv1, kernel_size=kernel_size_conv1[3]),
-            nn.Conv1d(in_channels=1, out_channels=num_kernel_conv1, kernel_size=kernel_size_conv1[4]),
-            nn.Conv1d(in_channels=1, out_channels=num_kernel_conv1, kernel_size=kernel_size_conv1[5]),
-            nn.Conv1d(in_channels=1, out_channels=num_kernel_conv1, kernel_size=kernel_size_conv1[6])
+            nn.Conv1d(in_channels=1, out_channels=num_kernel_conv1, kernel_size=kernel_size_conv1[i]) for i in range(7)
         ])
 
         self.conv2_layers = nn.ModuleList([
-            nn.Conv1d(in_channels=num_kernel_conv1, out_channels=num_kernel_conv2, kernel_size=kernel_size_conv2[0]),
-            nn.Conv1d(in_channels=num_kernel_conv1, out_channels=num_kernel_conv2, kernel_size=kernel_size_conv2[1]),
-            nn.Conv1d(in_channels=num_kernel_conv1, out_channels=num_kernel_conv2, kernel_size=kernel_size_conv2[2]),
-            nn.Conv1d(in_channels=num_kernel_conv1, out_channels=num_kernel_conv2, kernel_size=kernel_size_conv2[3]),
-            nn.Conv1d(in_channels=num_kernel_conv1, out_channels=num_kernel_conv2, kernel_size=kernel_size_conv2[4]),
-            nn.Conv1d(in_channels=num_kernel_conv1, out_channels=num_kernel_conv2, kernel_size=kernel_size_conv2[5]),
-            nn.Conv1d(in_channels=num_kernel_conv1, out_channels=num_kernel_conv2, kernel_size=kernel_size_conv2[6])
+            nn.Conv1d(in_channels=num_kernel_conv1, out_channels=num_kernel_conv2, kernel_size=kernel_size_conv2[i]) for i in range(7)
         ])
 
-        self.pool = nn.MaxPool1d(kernel_size=max(kernel_size_pooling, 1))
+        self.pool = nn.MaxPool1d(kernel_size=kernel_size_pooling)
 
         num_channel = len(kernel_size_conv1)
         output_length = 0
         for i in range(num_channel):
-            output_length += int(((input_length - kernel_size_conv1[i] + 1 - kernel_size_conv2[i] + 1) - max(kernel_size_pooling, 1)) / max(kernel_size_pooling, 1)) + 1
+            output_length += int(((input_length - kernel_size_conv1[i] + 1 - kernel_size_conv2[i] + 1) - kernel_size_pooling) / kernel_size_pooling) + 1
 
         self.fc1 = nn.Linear(in_features=output_length * num_kernel_conv2, out_features=fc_size + 200)
         self.dropout = nn.Dropout(p=dropout_rate)
@@ -193,10 +181,9 @@ class TimeSeriesCNN(nn.Module):
         x_final = torch.sigmoid(self.fc3(x_fc2)).squeeze()
         return x_final
 
-
 # Step 6: Training and Evaluation with Early Stopping
 class EarlyStopping:
-    def __init__(self, patience=5, delta=0.001):
+    def __init__(self, patience=100, delta=0.001):
         self.patience = patience
         self.delta = delta
         self.counter = 0
@@ -335,37 +322,13 @@ def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel
         print(f"An error occurred: {e}")
         return 0.0
 
-
-
-
-    except KeyboardInterrupt:
-        print("Training interrupted. Saving the current model state.")
-        torch.save(model, "interrupted_model.pth")
-        if return_history:
-            return model, float(accuracy_test), loss_value, accuracy_in_train, accuracy_in_test
-        return float(accuracy_test)
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return 0.0
-
 # Step 7: Define Fitness Function
 def fitness_func(ga_instance, solution, solution_idx):
-    num_kernel_conv1 = int("".join(map(str, solution[:4])), 2)
-    num_kernel_conv2 = int("".join(map(str, solution[4:8])), 2)
-    kernel_size_conv1 = [int("".join(map(str, solution[8 + i*3:11 + i*3])), 2) for i in range(7)]
-    kernel_size_conv2 = [int("".join(map(str, solution[29 + i*3:32 + i*3])), 2) for i in range(7)]
-    kernel_size_pooling = int("".join(map(str, solution[50:53])), 2)
-
-    # 确保卷积核大小和池化大小大于零
-    kernel_size_conv1 = [ks if ks > 0 else 1 for ks in kernel_size_conv1]
-    kernel_size_conv2 = [ks if ks > 0 else 1 for ks in kernel_size_conv2]
-    kernel_size_pooling = kernel_size_pooling if kernel_size_pooling > 0 else 1
-
-    if num_kernel_conv1 == 0:  # 确保卷积核数量不为零
-        num_kernel_conv1 = 1
-    if num_kernel_conv2 == 0:  # 确保卷积核数量不为零
-        num_kernel_conv2 = 1
+    num_kernel_conv1 = int("".join(map(str, solution[:6])), 2) + 32
+    num_kernel_conv2 = int("".join(map(str, solution[6:12])), 2) + 32
+    kernel_size_conv1 = [int("".join(map(str, solution[12 + i*5:17 + i*5])), 2) + 16 for i in range(7)]
+    kernel_size_conv2 = [int("".join(map(str, solution[47 + i*5:52 + i*5])), 2) + 16 for i in range(7)]
+    kernel_size_pooling = int("".join(map(str, solution[82:87])), 2) + 16
 
     fitness = train_and_eval(num_kernel_conv1=num_kernel_conv1,
                              num_kernel_conv2=num_kernel_conv2,
@@ -380,7 +343,7 @@ def fitness_func(ga_instance, solution, solution_idx):
 num_generations = 10
 sol_per_pop = 100
 num_parents_mating = 50
-num_genes = 50  # Adjusted for binary representation
+num_genes = 87  # Adjusted for binary representation
 init_range_low = 0
 init_range_high = 1
 
@@ -401,16 +364,11 @@ ga_instance.run()
 ga_instance.plot_fitness()
 
 solution, solution_fitness, solution_idx = ga_instance.best_solution()
-num_kernel_conv1 = int("".join(map(str, solution[:4])), 2)
-num_kernel_conv2 = int("".join(map(str, solution[4:8])), 2)
-kernel_size_conv1 = [int("".join(map(str, solution[8 + i*3:11 + i*3])), 2) for i in range(7)]
-kernel_size_conv2 = [int("".join(map(str, solution[29 + i*3:32 + i*3])), 2) for i in range(7)]
-kernel_size_pooling = int("".join(map(str, solution[50:53])), 2)
-
-# 确保卷积核大小和池化大小大于零
-kernel_size_conv1 = [ks if ks > 0 else 1 for ks in kernel_size_conv1]
-kernel_size_conv2 = [ks if ks > 0 else 1 for ks in kernel_size_conv2]
-kernel_size_pooling = kernel_size_pooling if kernel_size_pooling > 0 else 1
+num_kernel_conv1 = int("".join(map(str, solution[:6])), 2) + 32
+num_kernel_conv2 = int("".join(map(str, solution[6:12])), 2) + 32
+kernel_size_conv1 = [int("".join(map(str, solution[12 + i*5:17 + i*5])), 2) + 16 for i in range(7)]
+kernel_size_conv2 = [int("".join(map(str, solution[47 + i*5:52 + i*5])), 2) + 16 for i in range(7)]
+kernel_size_pooling = int("".join(map(str, solution[82:87])), 2) + 16
 
 print("Parameters of the best solution:")
 print("num_kernel_conv1:", num_kernel_conv1)
@@ -448,20 +406,7 @@ plt.ylabel('Accuracy')
 plt.title(f"accuracy train:{accuracy_in_train[-1]:.2f}%, test:{accuracy_in_test[-1]:.2f}%")
 plt.legend()
 
-# 如果您偏好在一个图中展示所有内容（仅准确率），注释掉上面的内容并使用这个：
-# plt.figure(figsize=(10, 5))  # 更大的图形尺寸以便更好的可视化
-# plt.plot(accuracy_in_train, label='训练集准确率', color='blue')
-# plt.plot(accuracy_in_test, label='测试集准确率', color='red')
-# plt.title("训练与测试准确率随 Epoch 变化")
-# plt.xlabel("Epoch")
-# plt.ylabel("准确率 (%)")
-# plt.grid(True)  # 添加网格线以便于阅读
-# plt.legend()
-
 plt.show()
 
 # 保存模型
 torch.save(model, "model.pth")
-
-
-
