@@ -3,9 +3,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
 from matplotlib import pyplot as plt
-import pygad
+import os
+from deap import base, creator, tools, algorithms
+import random
 
 device = torch.device("cpu")
 
@@ -75,11 +76,11 @@ test_data = test_data[['momentum', 'stochastic_K', 'RSI', 'MACD', 'LW', 'A/D Osc
 
 # Step 4: Make Trainable Dataset
 TIME_WINDOW_SIZE = 64
-num_epochs = 100
+num_epochs = 80
 batch_size = 8
-lr = 0.0015  # 下降到0.001后，会显著过拟合
+lr = 0.0015
 
-weight_decay = 1e-3 # L2正则化系数
+weight_decay = 1e-3
 
 train_sequences = []
 train_labels = []
@@ -184,7 +185,7 @@ class TimeSeriesCNN(nn.Module):
 
 # Step 6: Training and Evaluation with Early Stopping
 class EarlyStopping:
-    def __init__(self, patience=100, delta=0.001):
+    def __init__(self, patience=100, delta=0.0000001):
         self.patience = patience
         self.delta = delta
         self.counter = 0
@@ -208,8 +209,8 @@ class EarlyStopping:
     def save_checkpoint(self, val_loss, model):
         torch.save(model.state_dict(), 'checkpoint.pt')
 
-def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel_size_conv2, kernel_size_pooling, print_accuracy=False, return_history=False):
-    print("开始训练模型...")
+def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel_size_conv2, kernel_size_pooling, generation, individual, print_accuracy=False, return_history=False):
+    print(f"开始训练模型: Generation {generation}, Individual {individual}")
     model = TimeSeriesCNN(input_length=TIME_WINDOW_SIZE, 
                           num_kernel_conv1=num_kernel_conv1, 
                           num_kernel_conv2=num_kernel_conv2, 
@@ -296,15 +297,16 @@ def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel
                 if print_accuracy:
                     print(f'Epoch [{epoch + 1}/{num_epochs}], Train Accuracy: {accuracy_train:.2f}%, Test Accuracy: {accuracy_test:.2f}%')
 
-        # 绘制横轴为 epoch，纵轴为 accuracy 的图
+        # 保存每个个体的训练图像
         plt.figure()
         plt.plot(range(1, len(accuracy_in_train) + 1), accuracy_in_train, label='Train Accuracy')
         plt.plot(range(1, len(accuracy_in_test) + 1), accuracy_in_test, label='Test Accuracy')
         plt.xlabel('Epoch')
         plt.ylabel('Accuracy')
-        plt.title('Training and Test Accuracy')
+        plt.title(f'Generation {generation}, Individual {individual} Accuracy')
         plt.legend()
-        plt.show()
+        plt.savefig(f'/Users/katerina/Documents/GAoptimizedCNN/train_2nd/gen_{generation}_ind_{individual}_accuracy.png')
+        plt.close()
 
         fitness = float(accuracy_test)
         if return_history:
@@ -316,98 +318,109 @@ def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel
         print("Training interrupted. Saving the current model state.")
         torch.save(model, "interrupted_model.pth")
         if return_history:
-            return model, float(accuracy_test), loss_value, accuracy_in_train, accuracy_in_test
-        return float(accuracy_test)
-
+            return model, float(accuracy_test)
     except Exception as e:
         print(f"An error occurred: {e}")
         return 0.0
 
 # Step 7: Define Fitness Function
-def fitness_func(ga_instance, solution, solution_idx):
-    num_kernel_conv1 = int("".join(map(str, solution[:6])), 2) + 32
-    num_kernel_conv2 = int("".join(map(str, solution[6:12])), 2) + 32
-    kernel_size_conv1 = [int("".join(map(str, solution[12 + i*5:17 + i*5])), 2) + 16 for i in range(7)]
-    kernel_size_conv2 = [int("".join(map(str, solution[47 + i*5:52 + i*5])), 2) + 16 for i in range(7)]
-    kernel_size_pooling = int("".join(map(str, solution[82:87])), 2) + 16
+def fitness_func(individual):
+    num_kernel_conv1 = int("".join(map(str, individual[:6])), 2) + 32
+    num_kernel_conv2 = int("".join(map(str, individual[6:12])), 2) + 32
+    kernel_size_conv1 = [int("".join(map(str, individual[12 + i*5:17 + i*5])), 2) + 1 for i in range(7)]
+    kernel_size_conv2 = [int("".join(map(str, individual[47 + i*5:52 + i*5])), 2) + 1 for i in range(7)]
+    kernel_size_pooling = int("".join(map(str, individual[82:87])), 2) + 1
 
     fitness = train_and_eval(num_kernel_conv1=num_kernel_conv1,
                              num_kernel_conv2=num_kernel_conv2,
                              kernel_size_conv1=kernel_size_conv1,
                              kernel_size_conv2=kernel_size_conv2,
                              kernel_size_pooling=kernel_size_pooling,
+                             generation='final',
+                             individual='best',
                              print_accuracy=False,
                              return_history=False)
-    return fitness
+    return (fitness,)  # DEAP expects a tuple
 
-# GA parameters
-num_generations = 10
-sol_per_pop = 100
-num_parents_mating = 50
-num_genes = 87  # Adjusted for binary representation
-init_range_low = 0
-init_range_high = 1
+# Step 8: Initialize DEAP
+creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+creator.create("Individual", list, fitness=creator.FitnessMax)
 
-ga_instance = pygad.GA(
-    num_generations=num_generations,
-    num_parents_mating=num_parents_mating,
-    fitness_func=fitness_func,
-    sol_per_pop=sol_per_pop,
-    num_genes=num_genes,
-    gene_type=int,
-    init_range_low=init_range_low,
-    init_range_high=init_range_high,
-    mutation_probability=0.25, 
-    crossover_probability=0.7
-)
+toolbox = base.Toolbox()
 
-ga_instance.run()
-ga_instance.plot_fitness()
+# Attribute generator
+toolbox.register("attr_bool", random.randint, 0, 1)
 
-solution, solution_fitness, solution_idx = ga_instance.best_solution()
-num_kernel_conv1 = int("".join(map(str, solution[:6])), 2) + 32
-num_kernel_conv2 = int("".join(map(str, solution[6:12])), 2) + 32
-kernel_size_conv1 = [int("".join(map(str, solution[12 + i*5:17 + i*5])), 2) + 16 for i in range(7)]
-kernel_size_conv2 = [int("".join(map(str, solution[47 + i*5:52 + i*5])), 2) + 16 for i in range(7)]
-kernel_size_pooling = int("".join(map(str, solution[82:87])), 2) + 16
+# Structure initializers
+toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_bool, 87)
+toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
-print("Parameters of the best solution:")
-print("num_kernel_conv1:", num_kernel_conv1)
-print("num_kernel_conv2:", num_kernel_conv2)
-print("kernel_size_conv1:", kernel_size_conv1)
-print("kernel_size_conv2:", kernel_size_conv2)
-print("kernel_size_pooling:", kernel_size_pooling)
-print("Fitness value of the best solution = {solution_fitness}".format(solution_fitness=solution_fitness))
-print("Index of the best solution : {solution_idx}".format(solution_idx=solution_idx))
+toolbox.register("evaluate", fitness_func)
+toolbox.register("mate", tools.cxTwoPoint)
+toolbox.register("mutate", tools.mutFlipBit, indpb=0.05)
+toolbox.register("select", tools.selTournament, tournsize=3)
 
-# Step 9: Train and output best pop
-model, fitness, loss_value, accuracy_in_train, accuracy_in_test = train_and_eval(num_kernel_conv1=num_kernel_conv1,
-                                                                                 num_kernel_conv2=num_kernel_conv2,
-                                                                                 kernel_size_conv1=kernel_size_conv1,
-                                                                                 kernel_size_conv2=kernel_size_conv2,
-                                                                                 kernel_size_pooling=kernel_size_pooling,
-                                                                                 print_accuracy=True,
-                                                                                 return_history=True)
+# Step 9: Run the GA
+def main():
+    pop = toolbox.population(n=100)
+    hof = tools.HallOfFame(1)
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
 
-plt.figure()
+    pop, log = algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.25, ngen=10, stats=stats, halloffame=hof, verbose=True)
 
-# 绘制损失值（BCE Loss）
-plt.subplot(1, 2, 1)
-plt.plot(loss_value, label='Loss')
-plt.title("BCE Loss")
-plt.xlabel("epoch")
-plt.legend()
+    return pop, log, hof
 
-# 绘制训练和测试集的准确率
-plt.subplot(1, 2, 2)
-plt.plot(accuracy_in_train, label='Train Accuracy')
-plt.plot(accuracy_in_test, label='Test Accuracy')
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
-plt.title(f"accuracy train:{accuracy_in_train[-1]:.2f}%, test:{accuracy_in_test[-1]:.2f}%")
-plt.legend()
+if __name__ == "__main__":
+    pop, log, hof = main()
 
-plt.show()
+    best_individual = hof[0]
+    num_kernel_conv1 = int("".join(map(str, best_individual[:6])), 2) + 32
+    num_kernel_conv2 = int("".join(map(str, best_individual[6:12])), 2) + 32
+    kernel_size_conv1 = [int("".join(map(str, best_individual[12 + i*5:17 + i*5])), 2) + 1 for i in range(7)]
+    kernel_size_conv2 = [int("".join(map(str, best_individual[47 + i*5:52 + i*5])), 2) + 1 for i in range(7)]
+    kernel_size_pooling = int("".join(map(str, best_individual[82:87])), 2) + 1
 
-# 保存模型
-torch.save(model, "model.pth")
+    print("Parameters of the best solution:")
+    print("num_kernel_conv1:", num_kernel_conv1)
+    print("num_kernel_conv2:", num_kernel_conv2)
+    print("kernel_size_conv1:", kernel_size_conv1)
+    print("kernel_size_conv2:", kernel_size_conv2)
+    print("kernel_size_pooling:", kernel_size_pooling)
+    print("Fitness value of the best solution =", best_individual.fitness.values[0])
+
+    # Step 10: Train and output best pop
+    model, fitness, loss_value, accuracy_in_train, accuracy_in_test = train_and_eval(num_kernel_conv1=num_kernel_conv1,
+                                                                                     num_kernel_conv2=num_kernel_conv2,
+                                                                                     kernel_size_conv1=kernel_size_conv1,
+                                                                                     kernel_size_conv2=kernel_size_conv2,
+                                                                                     kernel_size_pooling=kernel_size_pooling,
+                                                                                     generation='final',
+                                                                                     individual='best',
+                                                                                     print_accuracy=True,
+                                                                                     return_history=True)
+
+    plt.figure()
+
+    # 绘制损失值（BCE Loss）
+    plt.subplot(1, 2, 1)
+    plt.plot(loss_value, label='Loss')
+    plt.title("BCE Loss")
+    plt.xlabel("epoch")
+    plt.legend()
+
+    # 绘制训练和测试集的准确率
+    plt.subplot(1, 2, 2)
+    plt.plot(accuracy_in_train, label='Train Accuracy')
+    plt.plot(accuracy_in_test, label='Test Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.title(f"accuracy train:{accuracy_in_train[-1]:.2f}%, test:{accuracy_in_test[-1]:.2f}%")
+    plt.legend()
+
+    plt.show()
+
+    # 保存模型
+    torch.save(model, "/Users/katerina/Documents/GAoptimizedCNN/train_2nd/model.pth")

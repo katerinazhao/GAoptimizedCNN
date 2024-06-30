@@ -3,9 +3,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
 from matplotlib import pyplot as plt
 import pygad
+import os
 
 device = torch.device("cpu")
 
@@ -75,11 +75,11 @@ test_data = test_data[['momentum', 'stochastic_K', 'RSI', 'MACD', 'LW', 'A/D Osc
 
 # Step 4: Make Trainable Dataset
 TIME_WINDOW_SIZE = 64
-num_epochs = 100
+num_epochs = 1
 batch_size = 8
-lr = 0.0015  # 下降到0.001后，会显著过拟合
+lr = 0.0015
 
-weight_decay = 1e-3 # L2正则化系数
+weight_decay = 1e-3
 
 train_sequences = []
 train_labels = []
@@ -184,7 +184,7 @@ class TimeSeriesCNN(nn.Module):
 
 # Step 6: Training and Evaluation with Early Stopping
 class EarlyStopping:
-    def __init__(self, patience=100, delta=0.001):
+    def __init__(self, patience=100, delta=0.0000001):
         self.patience = patience
         self.delta = delta
         self.counter = 0
@@ -208,8 +208,8 @@ class EarlyStopping:
     def save_checkpoint(self, val_loss, model):
         torch.save(model.state_dict(), 'checkpoint.pt')
 
-def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel_size_conv2, kernel_size_pooling, print_accuracy=False, return_history=False):
-    print("开始训练模型...")
+def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel_size_conv2, kernel_size_pooling, generation, individual, print_accuracy=False, return_history=False):
+    print(f"开始训练模型: Generation {generation}, Individual {individual}")
     model = TimeSeriesCNN(input_length=TIME_WINDOW_SIZE, 
                           num_kernel_conv1=num_kernel_conv1, 
                           num_kernel_conv2=num_kernel_conv2, 
@@ -296,15 +296,16 @@ def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel
                 if print_accuracy:
                     print(f'Epoch [{epoch + 1}/{num_epochs}], Train Accuracy: {accuracy_train:.2f}%, Test Accuracy: {accuracy_test:.2f}%')
 
-        # 绘制横轴为 epoch，纵轴为 accuracy 的图
+        # 保存每个个体的训练图像
         plt.figure()
         plt.plot(range(1, len(accuracy_in_train) + 1), accuracy_in_train, label='Train Accuracy')
         plt.plot(range(1, len(accuracy_in_test) + 1), accuracy_in_test, label='Test Accuracy')
         plt.xlabel('Epoch')
         plt.ylabel('Accuracy')
-        plt.title('Training and Test Accuracy')
+        plt.title(f'Generation {generation}, Individual {individual} Accuracy')
         plt.legend()
-        plt.show()
+        plt.savefig(f'/Users/katerina/Documents/GAoptimizedCNN/train_2nd/gen_{generation}_ind_{individual}_accuracy.png')
+        plt.close()
 
         fitness = float(accuracy_test)
         if return_history:
@@ -331,19 +332,59 @@ def fitness_func(ga_instance, solution, solution_idx):
     kernel_size_conv2 = [int("".join(map(str, solution[47 + i*5:52 + i*5])), 2) + 16 for i in range(7)]
     kernel_size_pooling = int("".join(map(str, solution[82:87])), 2) + 16
 
+    generation = ga_instance.generations_completed  # 获取当前代数
+    individual = solution_idx
     fitness = train_and_eval(num_kernel_conv1=num_kernel_conv1,
                              num_kernel_conv2=num_kernel_conv2,
                              kernel_size_conv1=kernel_size_conv1,
                              kernel_size_conv2=kernel_size_conv2,
                              kernel_size_pooling=kernel_size_pooling,
+                             generation=generation,
+                             individual=individual,
                              print_accuracy=False,
                              return_history=False)
     return fitness
 
+# 定义保存图形和参数的函数
+def save_plot_and_params(ga_instance):
+    print(f"Generation completed: {ga_instance.generations_completed}")  # 添加调试信息
+    
+    # 保存图形
+    plt.figure()
+    plt.plot(range(1, len(ga_instance.best_solutions_fitness) + 1), ga_instance.best_solutions_fitness, label='Best Fitness')
+    plt.xlabel('Generation')
+    plt.ylabel('Fitness')
+    plt.title('Fitness Over Generations')
+    plt.legend()
+    plt.savefig(f'/Users/katerina/Documents/GAoptimizedCNN/train_2nd/fitness_plot_gen_{ga_instance.generations_completed}.png')
+    plt.close()
+
+    # 保存参数
+    solutions = ga_instance.population
+    params = []
+    for solution in solutions:
+        num_kernel_conv1 = int("".join(map(str, solution[:6])), 2) + 32
+        num_kernel_conv2 = int("".join(map(str, solution[6:12])), 2) + 32
+        kernel_size_conv1 = [int("".join(map(str, solution[12 + i*5:17 + i*5])), 2) + 16 for i in range(7)]
+        kernel_size_conv2 = [int("".join(map(str, solution[47 + i*5:52 + i*5])), 2) + 16 for i in range(7)]
+        kernel_size_pooling = int("".join(map(str, solution[82:87])), 2) + 16
+
+        params.append({
+            'generation': ga_instance.generations_completed,
+            'num_kernel_conv1': num_kernel_conv1,
+            'num_kernel_conv2': num_kernel_conv2,
+            'kernel_size_conv1': kernel_size_conv1,
+            'kernel_size_conv2': kernel_size_conv2,
+            'kernel_size_pooling': kernel_size_pooling,
+        })
+
+    params_df = pd.DataFrame(params)
+    params_df.to_csv(f'/Users/katerina/Documents/GAoptimizedCNN/train_2nd/params_gen_{ga_instance.generations_completed}.csv', index=False)
+
 # GA parameters
 num_generations = 10
-sol_per_pop = 100
-num_parents_mating = 50
+sol_per_pop = 10
+num_parents_mating = 2
 num_genes = 87  # Adjusted for binary representation
 init_range_low = 0
 init_range_high = 1
@@ -357,12 +398,12 @@ ga_instance = pygad.GA(
     gene_type=int,
     init_range_low=init_range_low,
     init_range_high=init_range_high,
-    mutation_probability=0.25, 
-    crossover_probability=0.7
+    mutation_probability=0.25,
+    crossover_probability=0.7,
+    on_generation=save_plot_and_params
 )
 
 ga_instance.run()
-ga_instance.plot_fitness()
 
 solution, solution_fitness, solution_idx = ga_instance.best_solution()
 num_kernel_conv1 = int("".join(map(str, solution[:6])), 2) + 32
@@ -386,6 +427,8 @@ model, fitness, loss_value, accuracy_in_train, accuracy_in_test = train_and_eval
                                                                                  kernel_size_conv1=kernel_size_conv1,
                                                                                  kernel_size_conv2=kernel_size_conv2,
                                                                                  kernel_size_pooling=kernel_size_pooling,
+                                                                                 generation='final',
+                                                                                 individual='best',
                                                                                  print_accuracy=True,
                                                                                  return_history=True)
 
@@ -410,4 +453,4 @@ plt.legend()
 plt.show()
 
 # 保存模型
-torch.save(model, "model.pth")
+torch.save(model, "/Users/katerina/Documents/GAoptimizedCNN/train_2nd/model.pth")
