@@ -6,13 +6,25 @@ import torch.optim as optim
 from matplotlib import pyplot as plt
 import pygad
 import os
+import random
+import psutil
 
 device = torch.device("cpu")
+
+# 定义超参数的初始值
+initial_num_kernel_conv1 = 15
+initial_num_kernel_conv2 = 60
+initial_kernel_size_conv1 = [3, 3, 3, 3, 3, 3, 3]
+initial_kernel_size_conv2 = [3, 3, 3, 3, 3, 3, 3]
+initial_kernel_size_pooling = 2
 
 # Step 0: get data
 file_path = "/Users/katerina/Documents/GAoptimizedCNN/KS11-3.csv"
 df = pd.read_csv(file_path)
 df['volume'] = df['volume']
+
+# 打印前5行数据
+print(df.head())
 
 # 删除包含NaN值的行
 df.dropna(inplace=True)
@@ -75,7 +87,7 @@ test_data = test_data[['momentum', 'stochastic_K', 'RSI', 'MACD', 'LW', 'A/D Osc
 
 # Step 4: Make Trainable Dataset
 TIME_WINDOW_SIZE = 64
-num_epochs = 1
+num_epochs = 150
 batch_size = 8
 lr = 0.0015
 
@@ -182,32 +194,7 @@ class TimeSeriesCNN(nn.Module):
         x_final = torch.sigmoid(self.fc3(x_fc2)).squeeze()
         return x_final
 
-# Step 6: Training and Evaluation with Early Stopping
-class EarlyStopping:
-    def __init__(self, patience=100, delta=0.0000001):
-        self.patience = patience
-        self.delta = delta
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-
-    def __call__(self, val_loss, model):
-        score = -val_loss
-        if self.best_score is None:
-            self.best_score = score
-            self.save_checkpoint(val_loss, model)
-        elif score < self.best_score + self.delta:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_score = score
-            self.save_checkpoint(val_loss, model)
-            self.counter = 0
-
-    def save_checkpoint(self, val_loss, model):
-        torch.save(model.state_dict(), 'checkpoint.pt')
-
+# Step 6: Training and Evaluation
 def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel_size_conv2, kernel_size_pooling, generation, individual, print_accuracy=False, return_history=False):
     print(f"开始训练模型: Generation {generation}, Individual {individual}")
     model = TimeSeriesCNN(input_length=TIME_WINDOW_SIZE, 
@@ -220,8 +207,6 @@ def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel
     # Define loss function and optimizer
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-
-    early_stopping = EarlyStopping(patience=256, delta=0.001)
 
     loss_value = []
     accuracy_in_test = []
@@ -240,12 +225,12 @@ def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel
                 batch = train_sequences_tensor[i:i+batch_size, :, :]
                 labels = train_labels_tensor[i:i+batch_size]
 
-                if batch.size(0) == 0:  # 检查批次大小是否为零
+                if batch.size(0) == 0:
                     continue
 
                 # Forward pass
                 outputs = model(batch)
-                outputs = outputs.view(-1)  # 将输出调整为1D张量
+                outputs = outputs.view(-1)
                 predicted = (outputs.data > 0.5).to(int)
                 total_train += batch_size
                 correct_train += (predicted == labels).sum().item()
@@ -273,11 +258,11 @@ def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel
                     batch = test_sequences_tensor[i:i+batch_size, :, :]
                     labels = test_labels_tensor[i:i+batch_size]
 
-                    if batch.size(0) == 0:  # 检查批次大小是否为零
+                    if batch.size(0) == 0:
                         continue
 
                     outputs = model(batch)
-                    outputs = outputs.view(-1)  # 将输出调整为1D张量
+                    outputs = outputs.view(-1)
                     predicted = (outputs.data > 0.5).to(int)
                     total_test += batch_size
                     correct_test += (predicted == labels).sum().item()
@@ -287,15 +272,12 @@ def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel
                 accuracy_in_test.append(accuracy_test)
                 avg_val_loss = avg_val_loss / total_test
 
-                early_stopping(avg_val_loss, model)
-
-                if early_stopping.early_stop:
-                    print(f"Early stopping at epoch {epoch + 1}")
-                    break
-
                 if print_accuracy:
                     print(f'Epoch [{epoch + 1}/{num_epochs}], Train Accuracy: {accuracy_train:.2f}%, Test Accuracy: {accuracy_test:.2f}%')
 
+        # 打印超参数
+        print(f"Generation: {generation}, Individual: {individual}, num_kernel_conv1: {num_kernel_conv1}, num_kernel_conv2: {num_kernel_conv2}, kernel_size_conv1: {kernel_size_conv1}, kernel_size_conv2: {kernel_size_conv2}, kernel_size_pooling: {kernel_size_pooling}")
+        
         # 保存每个个体的训练图像
         plt.figure()
         plt.plot(range(1, len(accuracy_in_train) + 1), accuracy_in_train, label='Train Accuracy')
@@ -319,20 +301,17 @@ def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel
         if return_history:
             return model, float(accuracy_test), loss_value, accuracy_in_train, accuracy_in_test
         return float(accuracy_test)
-
     except Exception as e:
         print(f"An error occurred: {e}")
         return 0.0
+    
 
+    
 # Step 7: Define Fitness Function
 def fitness_func(ga_instance, solution, solution_idx):
-    num_kernel_conv1 = int("".join(map(str, solution[:6])), 2) + 32
-    num_kernel_conv2 = int("".join(map(str, solution[6:12])), 2) + 32
-    kernel_size_conv1 = [int("".join(map(str, solution[12 + i*5:17 + i*5])), 2) + 16 for i in range(7)]
-    kernel_size_conv2 = [int("".join(map(str, solution[47 + i*5:52 + i*5])), 2) + 16 for i in range(7)]
-    kernel_size_pooling = int("".join(map(str, solution[82:87])), 2) + 16
+    num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel_size_conv2, kernel_size_pooling = decode_gene(solution)
 
-    generation = ga_instance.generations_completed  # 获取当前代数
+    generation = ga_instance.generations_completed
     individual = solution_idx
     fitness = train_and_eval(num_kernel_conv1=num_kernel_conv1,
                              num_kernel_conv2=num_kernel_conv2,
@@ -343,12 +322,35 @@ def fitness_func(ga_instance, solution, solution_idx):
                              individual=individual,
                              print_accuracy=False,
                              return_history=False)
+    print(f"Generation: {generation}, Individual: {individual}, Fitness: {fitness}")
     return fitness
 
 # 定义保存图形和参数的函数
 def save_plot_and_params(ga_instance):
-    print(f"Generation completed: {ga_instance.generations_completed}")  # 添加调试信息
+    generation = ga_instance.generations_completed
+    print(f"Generation completed: {generation}")
     
+# Save parameters to CSV
+    solutions = ga_instance.population
+    params = []
+    for idx, solution in enumerate(solutions):
+        num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel_size_conv2, kernel_size_pooling = decode_gene(solution)
+        params.append({
+            'Generation': generation,
+            'Individual': idx,
+            'num_kernel_conv1': num_kernel_conv1,
+            'num_kernel_conv2': num_kernel_conv2,
+            'kernel_size_conv1': kernel_size_conv1,
+            'kernel_size_conv2': kernel_size_conv2,
+            'kernel_size_pooling': kernel_size_pooling,
+        })
+
+    params_df = pd.DataFrame(params)
+    params_df.to_csv(f'/Users/katerina/Documents/GAoptimizedCNN/train_2nd/params_gen_{generation}.csv', index=False)
+
+    # Save to Excel
+    params_df.to_excel(f'/Users/katerina/Documents/GAoptimizedCNN/train_2nd/params_gen_{generation}.xlsx', index=False)
+
     # 保存图形
     plt.figure()
     plt.plot(range(1, len(ga_instance.best_solutions_fitness) + 1), ga_instance.best_solutions_fitness, label='Best Fitness')
@@ -363,11 +365,11 @@ def save_plot_and_params(ga_instance):
     solutions = ga_instance.population
     params = []
     for solution in solutions:
-        num_kernel_conv1 = int("".join(map(str, solution[:6])), 2) + 32
-        num_kernel_conv2 = int("".join(map(str, solution[6:12])), 2) + 32
-        kernel_size_conv1 = [int("".join(map(str, solution[12 + i*5:17 + i*5])), 2) + 16 for i in range(7)]
-        kernel_size_conv2 = [int("".join(map(str, solution[47 + i*5:52 + i*5])), 2) + 16 for i in range(7)]
-        kernel_size_pooling = int("".join(map(str, solution[82:87])), 2) + 16
+        num_kernel_conv1 = initial_num_kernel_conv1
+        num_kernel_conv2 = initial_num_kernel_conv2
+        kernel_size_conv1 = initial_kernel_size_conv1
+        kernel_size_conv2 = initial_kernel_size_conv2
+        kernel_size_pooling = initial_kernel_size_pooling
 
         params.append({
             'generation': ga_instance.generations_completed,
@@ -381,76 +383,273 @@ def save_plot_and_params(ga_instance):
     params_df = pd.DataFrame(params)
     params_df.to_csv(f'/Users/katerina/Documents/GAoptimizedCNN/train_2nd/params_gen_{ga_instance.generations_completed}.csv', index=False)
 
-# GA parameters
+# 设置随机种子
+random_seed = 42
+random.seed(random_seed)
+np.random.seed(random_seed)
+torch.manual_seed(random_seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(random_seed)
+    torch.cuda.manual_seed_all(random_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+# 编码基因的函数
+def encode_gene(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel_size_conv2, kernel_size_pooling):
+    gene = []
+    gene += list(map(int, bin(num_kernel_conv1 - 1)[2:].zfill(6)))
+    gene += list(map(int, bin(num_kernel_conv2 - 1)[2:].zfill(6)))
+    for size in kernel_size_conv1:
+        gene += list(map(int, bin(size - 2)[2:].zfill(5)))
+    for size in kernel_size_conv2:
+        gene += list(map(int, bin(size - 2)[2:].zfill(5)))
+    gene += list(map(int, bin(kernel_size_pooling - 1)[2:].zfill(5)))
+    return gene
+
+# 解码基因的函数
+def decode_gene(gene):
+    kernel_size_conv1 = [(int("".join(map(str, gene[12 + i*5:17 + i*5])), 2) % 31 + 2) for i in range(7)]
+    kernel_size_conv2 = [(int("".join(map(str, gene[47 + i*5:52 + i*5])), 2) % 31 + 2) for i in range(7)]
+    num_kernel_conv1 = int("".join(map(str, gene[:6])), 2) % 63 + 1
+    num_kernel_conv2 = int("".join(map(str, gene[6:12])), 2) % 63 + 1
+    kernel_size_pooling = int("".join(map(str, gene[82:87])), 2) % 32 + 1
+
+    # 确保在基因全为 0 时产生一个非零值
+    if all(g == 0 for g in gene):
+        num_kernel_conv1 = random.randint(1, 63)
+        num_kernel_conv2 = random.randint(1, 63)
+        kernel_size_conv1 = [random.randint(1, 32) for _ in range(7)]
+        kernel_size_conv2 = [random.randint(1, 32) for _ in range(7)]
+        kernel_size_pooling = random.randint(1, 32)
+
+    return num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel_size_conv2, kernel_size_pooling
+
+# 初始化种群的函数
+def initial_population(sol_per_pop, num_genes):
+    population = []
+    for _ in range(sol_per_pop):
+        gene = [random.randint(0, 1) for _ in range(num_genes)]
+        population.append(gene)
+    return population
+
+# 生成下一代的函数
+def next_generation(population, fitness_scores, num_parents_mating):
+    parents = select_parents(population, fitness_scores, num_parents_mating)
+    offspring = crossover(parents)
+    offspring = mutate_gene(offspring)
+    return parents + offspring
+
+# 选择父代的函数
+def select_parents(population, fitness_scores, num_parents_mating):
+    parents = []
+    for _ in range(num_parents_mating):
+        max_fitness_idx = np.where(fitness_scores == np.max(fitness_scores))
+        max_fitness_idx = max_fitness_idx[0][0]
+        parents.append(population[max_fitness_idx])
+        fitness_scores[max_fitness_idx] = -99999999999
+    return parents
+
+# 交叉操作的函数
+def crossover(parents):
+    offspring = []
+    for k in range(len(parents) // 2):
+        parent1 = parents[2 * k]
+        parent2 = parents[2 * k + 1]
+        crossover_point = random.randint(1, len(parent1) - 1)
+        child1 = parent1[:crossover_point] + parent2[crossover_point:]
+        child2 = parent2[:crossover_point] + parent1[crossover_point:]
+        offspring.append(child1)
+        offspring.append(child2)
+    return offspring
+
+# 变异基因的函数
+def mutate_gene(offspring):
+    mutation_percent_genes = 0.1
+
+    for gene_idx in range(len(offspring)):
+        if random.random() < mutation_percent_genes:
+            mutation_type = random.choice(["random", "swap", "inversion", "scramble"])
+            if mutation_type == "random":
+                # 随机选择一个基因进行变异
+                mutated_gene = random.choice([0, 1])
+                offspring[gene_idx][random.randint(0, len(offspring[gene_idx]) - 1)] = mutated_gene
+            elif mutation_type == "swap":
+                # 交换两个基因的位置
+                index1 = random.randint(0, len(offspring[gene_idx]) - 1)
+                index2 = random.randint(0, len(offspring[gene_idx]) - 1)
+                offspring[gene_idx][index1], offspring[gene_idx][index2] = offspring[gene_idx][index2], offspring[gene_idx][index1]
+            elif mutation_type == "inversion":
+                # 反转一段基因
+                start_index = random.randint(0, len(offspring[gene_idx]) - 1)
+                end_index = random.randint(start_index, len(offspring[gene_idx]) - 1)
+                offspring[gene_idx][start_index:end_index] = reversed(offspring[gene_idx][start_index:end_index])
+            elif mutation_type == "scramble":
+                # 打乱一段基因
+                start_index = random.randint(0, len(offspring[gene_idx]) - 1)
+                end_index = random.randint(start_index, len(offspring[gene_idx]) - 1)
+                scrambled_segment = offspring[gene_idx][start_index:end_index]
+                random.shuffle(scrambled_segment)
+                offspring[gene_idx][start_index:end_index] = scrambled_segment
+
+            # 确保至少有一个基因被设置为 1
+            if all(gene == 0 for gene in offspring[gene_idx]):
+                offspring[gene_idx][random.randint(0, len(offspring[gene_idx]) - 1)] = 1
+
+    return offspring
+
+# Step 6: Training and Evaluation
+def train_and_eval(num_kernel_conv1, num_kernel_conv2, kernel_size_conv1, kernel_size_conv2, kernel_size_pooling, generation, individual, print_accuracy=False, return_history=False):
+    print(f"开始训练模型: Generation {generation}, Individual {individual}")
+    model = TimeSeriesCNN(input_length=TIME_WINDOW_SIZE, 
+                          num_kernel_conv1=num_kernel_conv1, 
+                          num_kernel_conv2=num_kernel_conv2, 
+                          kernel_size_conv1=kernel_size_conv1, 
+                          kernel_size_conv2=kernel_size_conv2, 
+                          kernel_size_pooling=kernel_size_pooling).to(device)
+
+    # Define loss function and optimizer
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+
+    loss_value = []
+    accuracy_in_test = []
+    accuracy_in_train = []
+
+    try:
+        print("Starting training...")
+        for epoch in range(num_epochs):
+            print(f"Epoch {epoch + 1}/{num_epochs}")
+            model.train()
+            avg_loss_per_epoch = 0.0
+            num_batch = 0
+            correct_train = 0
+            total_train = 0
+            for i in range(0, train_sequences_tensor.shape[0], batch_size):
+                batch = train_sequences_tensor[i:i+batch_size, :, :]
+                labels = train_labels_tensor[i:i+batch_size]
+
+                if batch.size(0) == 0:
+                    continue
+
+                # Forward pass
+                outputs = model(batch)
+                outputs = outputs.view(-1)
+                predicted = (outputs.data > 0.5).to(int)
+                total_train += batch_size
+                correct_train += (predicted == labels).sum().item()
+
+                # Compute loss and perform backpropagation
+                loss = criterion(outputs, labels.float())
+                avg_loss_per_epoch += loss.item()
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                num_batch += 1
+
+            avg_loss_per_epoch /= num_batch
+            accuracy_train = correct_train / total_train
+            print(f"训练集 - 损失: {avg_loss_per_epoch}, 准确率: {accuracy_train}")
+            loss_value.append(avg_loss_per_epoch)
+            accuracy_in_train.append(accuracy_train)
+
+            model.eval()
+            total_test = test_sequences_tensor.shape[0]
+            correct_test = 0
+
+            with torch.no_grad():
+                outputs = model(test_sequences_tensor)
+                outputs = outputs.view(-1)
+                predicted = (outputs.data > 0.5).to(int)
+                correct_test += (predicted == test_labels_tensor).sum().item()
+                accuracy_test = correct_test / total_test
+                print(f"测试集 - 准确率: {accuracy_test}")
+                accuracy_in_test.append(accuracy_test)
+        
+        print(f"Generation {generation}, Individual {individual}, Test Accuracy: {accuracy_in_test[-1]}")
+
+        if return_history:
+            return accuracy_in_test[-1], (loss_value, accuracy_in_train, accuracy_in_test)
+        else:
+            return accuracy_in_test[-1]
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return 0
+
+# Step 7: Fitness Function
+def fitness_func(solution, solution_idx):
+    decoded_solution = decode_gene(solution)
+    fitness = train_and_eval(*decoded_solution, generation=0, individual=solution_idx)
+    return fitness
+
+# Step 8: Save plot and parameters function
+def save_plot_and_params(generation, best_fitness, best_solution):
+    print(f"Generation {generation}: Best Fitness = {best_fitness}")
+    print(f"Best solution: {decode_gene(best_solution)}")
+
+# Step 9: Initialize Population and Run GA
+sol_per_pop = 100
+num_genes = 87
+num_parents_mating = 5
 num_generations = 10
-sol_per_pop = 10
-num_parents_mating = 2
-num_genes = 87  # Adjusted for binary representation
-init_range_low = 0
-init_range_high = 1
+pop_size = (sol_per_pop, num_genes)
+crossover_probability = 0.8
+mutation_probability = 0.2
 
-ga_instance = pygad.GA(
-    num_generations=num_generations,
-    num_parents_mating=num_parents_mating,
-    fitness_func=fitness_func,
-    sol_per_pop=sol_per_pop,
-    num_genes=num_genes,
-    gene_type=int,
-    init_range_low=init_range_low,
-    init_range_high=init_range_high,
-    mutation_probability=0.25,
-    crossover_probability=0.7,
-    on_generation=save_plot_and_params
-)
+population = initial_population(sol_per_pop, num_genes)
+fitness_scores = np.zeros(sol_per_pop)
 
-ga_instance.run()
+best_fitness = 0
+best_solution = None
 
-solution, solution_fitness, solution_idx = ga_instance.best_solution()
-num_kernel_conv1 = int("".join(map(str, solution[:6])), 2) + 32
-num_kernel_conv2 = int("".join(map(str, solution[6:12])), 2) + 32
-kernel_size_conv1 = [int("".join(map(str, solution[12 + i*5:17 + i*5])), 2) + 16 for i in range(7)]
-kernel_size_conv2 = [int("".join(map(str, solution[47 + i*5:52 + i*5])), 2) + 16 for i in range(7)]
-kernel_size_pooling = int("".join(map(str, solution[82:87])), 2) + 16
+for generation in range(num_generations):
+    print(f"Generation {generation}")
+    for i in range(sol_per_pop):
+        fitness_scores[i] = fitness_func(population[i], i)
 
-print("Parameters of the best solution:")
-print("num_kernel_conv1:", num_kernel_conv1)
-print("num_kernel_conv2:", num_kernel_conv2)
-print("kernel_size_conv1:", kernel_size_conv1)
-print("kernel_size_conv2:", kernel_size_conv2)
-print("kernel_size_pooling:", kernel_size_pooling)
-print("Fitness value of the best solution = {solution_fitness}".format(solution_fitness=solution_fitness))
-print("Index of the best solution : {solution_idx}".format(solution_idx=solution_idx))
+    parents = select_parents(population, fitness_scores, num_parents_mating)
+    offspring = crossover(parents)
+    offspring = mutate_gene(offspring)
 
-# Step 9: Train and output best pop
-model, fitness, loss_value, accuracy_in_train, accuracy_in_test = train_and_eval(num_kernel_conv1=num_kernel_conv1,
-                                                                                 num_kernel_conv2=num_kernel_conv2,
-                                                                                 kernel_size_conv1=kernel_size_conv1,
-                                                                                 kernel_size_conv2=kernel_size_conv2,
-                                                                                 kernel_size_pooling=kernel_size_pooling,
-                                                                                 generation='final',
-                                                                                 individual='best',
-                                                                                 print_accuracy=True,
-                                                                                 return_history=True)
+    population = parents + offspring
 
-plt.figure()
+    best_fitness_idx = np.argmax(fitness_scores)
+    best_fitness = fitness_scores[best_fitness_idx]
+    best_solution = population[best_fitness_idx]
 
-# 绘制损失值（BCE Loss）
-plt.subplot(1, 2, 1)
+    save_plot_and_params(generation, best_fitness, best_solution)
+
+# Step 10: Get Best Solution
+best_solution_params = decode_gene(best_solution)
+print(f"Best solution parameters: {best_solution_params}")
+
+# Step 11: Train and Evaluate Best Model
+final_accuracy, history = train_and_eval(*best_solution_params, generation=num_generations, individual=0, return_history=True)
+
+# Step 12: Check System Resource Usage
+import os, psutil
+
+process = psutil.Process(os.getpid())
+print(f"Memory used: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+print(f"CPU used: {psutil.cpu_percent()}%")
+
+# Step 13: Plot Training and Testing Accuracy
+import matplotlib.pyplot as plt
+
+loss_value, accuracy_in_train, accuracy_in_test = history
+
 plt.plot(loss_value, label='Loss')
-plt.title("BCE Loss")
-plt.xlabel("epoch")
-plt.legend()
-
-# 绘制训练和测试集的准确率
-plt.subplot(1, 2, 2)
 plt.plot(accuracy_in_train, label='Train Accuracy')
 plt.plot(accuracy_in_test, label='Test Accuracy')
 plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
-plt.title(f"accuracy train:{accuracy_in_train[-1]:.2f}%, test:{accuracy_in_test[-1]:.2f}%")
+plt.ylabel('Value')
 plt.legend()
-
 plt.show()
 
-# 保存模型
-torch.save(model, "/Users/katerina/Documents/GAoptimizedCNN/train_2nd/model.pth")
+# Step 14: Save Model
+#torch.save(model.state_dict(), "best_model.pth")
+
+# Step 14: Save Model
+#torch.save(model.state_dict(), "/Users/katerina/Documents/GAoptimizedCNN/train_2nd/model.pth")
+
